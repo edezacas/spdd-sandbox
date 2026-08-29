@@ -1,0 +1,17 @@
+{
+  "name": "spdd-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sandbox project for manually testing the open-spdd skills end to end.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.14.0"
+  }
+}
