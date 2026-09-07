@@ -2,7 +2,7 @@ import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { AddressInfo } from "node:net";
 import { server } from "./server";
-import { addAuthor } from "../domain/author";
+import { addAuthor, listAuthors } from "../domain/author";
 import { listBooks } from "../domain/book";
 
 let baseUrl: string;
@@ -29,6 +29,16 @@ describe("sin autores registrados", () => {
     const html = await res.text();
     assert.match(html, /No hay autores disponibles/);
     assert.doesNotMatch(html, /<select/);
+  });
+
+  test("GET /authors con repositorio vacío muestra aviso y sin navegación", async () => {
+    const res = await fetch(`${baseUrl}/authors`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /No hay autores todavía\./);
+    assert.doesNotMatch(html, /<table/);
+    assert.doesNotMatch(html, /Anterior/);
+    assert.doesNotMatch(html, /Siguiente/);
   });
 });
 
@@ -150,5 +160,159 @@ describe("con autores registrados", () => {
   test("GET a una ruta no definida responde 404", async () => {
     const res = await fetch(`${baseUrl}/does-not-exist`);
     assert.equal(res.status, 404);
+  });
+});
+
+describe("GET /authors — listado paginado", () => {
+  // Añade 24 autores (page-00..page-23) además del "test-author-1" (Jane Austen)
+  // creado en la suite anterior → total 25 autores para páginas exactas de 10.
+  before(() => {
+    for (let i = 0; i < 24; i++) {
+      addAuthor({ id: `page-${String(i).padStart(2, "0")}`, name: `Autor ${i}` });
+    }
+  });
+
+  test("Happy path: page 2 pageSize 10 muestra autores 11–20, 'Página 2 de 3' y links prev/next", async () => {
+    const res = await fetch(`${baseUrl}/authors?page=2&pageSize=10`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Página 2 de 3/);
+    // 25 autores: índices 0..9 = página 1 (Jane + Autor 0..8), 10..19 = página 2 (Autor 9..18), 20..24 = página 3
+    for (let i = 9; i <= 18; i++) {
+      assert.match(html, new RegExp(`>Autor ${i}<`));
+    }
+    assert.doesNotMatch(html, />Autor 8</);
+    assert.doesNotMatch(html, />Autor 19</);
+    assert.doesNotMatch(html, />Jane Austen</);
+    assert.match(html, /Anterior/);
+    assert.match(html, /Siguiente/);
+    assert.match(html, /href="\/authors\?page=1&pageSize=10"/);
+    assert.match(html, /href="\/authors\?page=3&pageSize=10"/);
+  });
+
+  test("sin params: página 1 con pageSize 10", async () => {
+    const res = await fetch(`${baseUrl}/authors`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Página 1 de 3/);
+    assert.match(html, />Jane Austen</);
+    assert.match(html, />Autor 0</);
+    assert.doesNotMatch(html, />Autor 9</);
+    assert.doesNotMatch(html, /Anterior/);
+    assert.match(html, /Siguiente/);
+  });
+
+  test("última página parcial: page 3 pageSize 10 muestra los 5 restantes y sin next", async () => {
+    const res = await fetch(`${baseUrl}/authors?page=3&pageSize=10`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Página 3 de 3/);
+    assert.match(html, />Autor 19</);
+    assert.match(html, />Autor 23</);
+    assert.doesNotMatch(html, />Autor 18</);
+    assert.match(html, /Anterior/);
+    assert.doesNotMatch(html, /Siguiente/);
+  });
+
+  test("pageSize=100 en el límite superior responde 200 con todos los autores en una página", async () => {
+    const res = await fetch(`${baseUrl}/authors?pageSize=100`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Página 1 de 1/);
+    assert.match(html, />Jane Austen</);
+    assert.match(html, />Autor 23</);
+  });
+
+  test("parámetros inválidos responden 400 sin renderizar el listado", async () => {
+    const cases = ["page=abc", "page=0", "page=-1", "page=1.5", "pageSize=0", "pageSize=500", "pageSize=abc"];
+    for (const qs of cases) {
+      const res = await fetch(`${baseUrl}/authors?${qs}`);
+      assert.equal(res.status, 400, `expected 400 for ?${qs}`);
+      const html = await res.text();
+      assert.match(html, /enteros positivos/);
+      assert.doesNotMatch(html, /<table/);
+      assert.doesNotMatch(html, /Página \d+ de \d+/);
+    }
+  });
+
+  test("página más allá de la última: 200 con página vacía y sin next", async () => {
+    const res = await fetch(`${baseUrl}/authors?page=99`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.doesNotMatch(html, />Autor /);
+    assert.doesNotMatch(html, />Jane Austen</);
+    assert.doesNotMatch(html, /Siguiente/);
+  });
+
+  test("POST /authors (verbo no soportado en ruta conocida) responde 405", async () => {
+    const res = await fetch(`${baseUrl}/authors`, { method: "POST" });
+    assert.equal(res.status, 405);
+  });
+
+  test("los nombres de autor se escapan en el HTML (XSS)", async () => {
+    addAuthor({ id: "esc-1", name: "Le Guin & <Sons>" });
+    const res = await fetch(`${baseUrl}/authors?pageSize=100`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Le Guin &amp; &lt;Sons&gt;/);
+    assert.doesNotMatch(html, /Le Guin & <Sons>/);
+  });
+
+  test("regresión: GET /books/new sigue listando TODOS los autores en el <select>", async () => {
+    const res = await fetch(`${baseUrl}/books/new`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    const optionCount = (html.match(/<option value=/g) ?? []).length;
+    assert.equal(optionCount, listAuthors().length);
+    assert.match(html, /Jane Austen/);
+  });
+
+  // --- spdd-verify: targeted tests for uncovered Safeguards scenarios ---
+
+  test("negative pageSize responds 400 without rendering the listing", async () => {
+    const res = await fetch(`${baseUrl}/authors?pageSize=-10`);
+    assert.equal(res.status, 400);
+    const html = await res.text();
+    assert.match(html, /enteros positivos/);
+    assert.doesNotMatch(html, /<table/);
+    assert.doesNotMatch(html, /Página \d+ de \d+/);
+  });
+
+  test("total divides exactly by pageSize: last full page shows 'Página N de N' with no next link", async () => {
+    // Pad the accumulated total (26) up to an exact multiple of 10 (30).
+    for (let i = 0; i < 4; i++) {
+      addAuthor({ id: `exact-w-${i}`, name: `Exact W ${i}` });
+    }
+    assert.equal(listAuthors().length % 10, 0, "pad guard: total must divide exactly by 10");
+    const totalPages = Math.ceil(listAuthors().length / 10);
+
+    const res = await fetch(`${baseUrl}/authors?page=${totalPages}&pageSize=10`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    // totalPages must be exactly N (not N+1): no off-by-one extra page.
+    assert.match(html, new RegExp(`Página ${totalPages} de ${totalPages}`));
+    assert.doesNotMatch(html, /Siguiente/);
+    assert.match(html, /Anterior/);
+    // The very last author is on this page; the first author of the previous page is not.
+    assert.match(html, />Exact W 3</);
+    assert.doesNotMatch(html, />Autor 18</);
+  });
+
+  test("pageSize=100 upper bound with more than 100 authors: first 100 on 'Página 1 de 2'", async () => {
+    for (let i = 0; i < 150; i++) {
+      addAuthor({ id: `bulk-${String(i).padStart(3, "0")}`, name: `Bulk ${i}` });
+    }
+    assert.equal(listAuthors().length, 180, "pad guard: 30 previous + 150 bulk authors");
+
+    const res = await fetch(`${baseUrl}/authors?pageSize=100`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Página 1 de 2/);
+    // Exactly the first 100 authors are rendered: index 99 is the last item…
+    assert.match(html, />Bulk 69</);
+    // …and index 100 (the first author of page 2) must not appear.
+    assert.doesNotMatch(html, />Bulk 70</);
+    assert.match(html, /Siguiente/);
+    assert.match(html, /href="\/authors\?page=2&pageSize=100"/);
   });
 });
