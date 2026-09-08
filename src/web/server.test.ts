@@ -6,6 +6,22 @@ import { addAuthor, listAuthors } from "../domain/author";
 import { listBooks } from "../domain/book";
 
 let baseUrl: string;
+let authCookie: string;
+
+async function librarianCookie(): Promise<string> {
+  const res = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    body: new URLSearchParams({
+      username: "bibliotecario",
+      password: "biblioteca123",
+    }),
+    redirect: "manual",
+  });
+  assert.equal(res.status, 302);
+  const setCookie = res.headers.get("set-cookie");
+  assert.ok(setCookie, "el login debe establecer una cookie de sesión");
+  return setCookie.split(";")[0].trim();
+}
 
 before(async () => {
   await new Promise<void>((resolve) => {
@@ -13,6 +29,7 @@ before(async () => {
   });
   const address = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}`;
+  authCookie = await librarianCookie();
 });
 
 after(async () => {
@@ -24,7 +41,7 @@ after(async () => {
 // --- Scenario: no hay ningún autor todavía (debe ejecutarse antes de crear autores) ---
 describe("sin autores registrados", () => {
   test("GET /books/new muestra aviso y no renderiza <select> de autores", async () => {
-    const res = await fetch(`${baseUrl}/books/new`);
+    const res = await fetch(`${baseUrl}/books/new`, { headers: { cookie: authCookie } });
     assert.equal(res.status, 200);
     const html = await res.text();
     assert.match(html, /No hay autores disponibles/);
@@ -51,7 +68,7 @@ describe("con autores registrados", () => {
   });
 
   test("GET /books/new incluye un <select> con los autores existentes", async () => {
-    const res = await fetch(`${baseUrl}/books/new`);
+    const res = await fetch(`${baseUrl}/books/new`, { headers: { cookie: authCookie } });
     assert.equal(res.status, 200);
     const html = await res.text();
     assert.match(html, /<select/);
@@ -63,6 +80,7 @@ describe("con autores registrados", () => {
 
     const postRes = await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "Orgullo y prejuicio", authorId }),
       redirect: "manual",
     });
@@ -82,6 +100,7 @@ describe("con autores registrados", () => {
     const before = listBooks().length;
     const res = await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "", authorId }),
     });
     assert.equal(res.status, 400);
@@ -92,6 +111,7 @@ describe("con autores registrados", () => {
     const before = listBooks().length;
     const res = await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "   ", authorId }),
     });
     assert.equal(res.status, 400);
@@ -102,6 +122,7 @@ describe("con autores registrados", () => {
     const before = listBooks().length;
     const res = await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "Libro huérfano", authorId: "no-existe" }),
     });
     assert.equal(res.status, 400);
@@ -112,6 +133,7 @@ describe("con autores registrados", () => {
     const before = listBooks().length;
     const res = await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "Libro sin autor", authorId: "" }),
     });
     assert.equal(res.status, 400);
@@ -121,10 +143,12 @@ describe("con autores registrados", () => {
   test("cada libro insertado recibe un id único generado por el servidor", async () => {
     await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "Libro A", authorId }),
     });
     await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "Libro B", authorId }),
     });
 
@@ -138,11 +162,13 @@ describe("con autores registrados", () => {
 
     const first = await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "Título repetido", authorId }),
       redirect: "manual",
     });
     const second = await fetch(`${baseUrl}/books`, {
       method: "POST",
+      headers: { cookie: authCookie },
       body: new URLSearchParams({ title: "Título repetido", authorId }),
       redirect: "manual",
     });
@@ -259,7 +285,7 @@ describe("GET /authors — listado paginado", () => {
   });
 
   test("regresión: GET /books/new sigue listando TODOS los autores en el <select>", async () => {
-    const res = await fetch(`${baseUrl}/books/new`);
+    const res = await fetch(`${baseUrl}/books/new`, { headers: { cookie: authCookie } });
     assert.equal(res.status, 200);
     const html = await res.text();
     const optionCount = (html.match(/<option value=/g) ?? []).length;
@@ -314,5 +340,44 @@ describe("GET /authors — listado paginado", () => {
     assert.doesNotMatch(html, />Bulk 70</);
     assert.match(html, /Siguiente/);
     assert.match(html, /href="\/authors\?page=2&pageSize=100"/);
+  });
+});
+
+describe("Protección de alta de libros", () => {
+  test("protect-book-mutation-2: GET /books/new sin sesión redirige al login y no muestra el formulario", async () => {
+    const res = await fetch(`${baseUrl}/books/new`, { redirect: "manual" });
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.get("location"), "/login?next=/books/new");
+    const html = await res.text();
+    assert.doesNotMatch(html, /<select/);
+    assert.doesNotMatch(html, /<option/);
+    assert.doesNotMatch(html, /<form/);
+  });
+
+  test("protect-book-mutation-4: POST /books sin sesión redirige y no crea el libro", async () => {
+    const author = addAuthor({ id: "unauth-author-1", name: "Autor para redirigido" });
+    const before = listBooks().length;
+    const res = await fetch(`${baseUrl}/books`, {
+      method: "POST",
+      body: new URLSearchParams({ title: "Libro no autorizado", authorId: author.id }),
+      redirect: "manual",
+    });
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.get("location"), "/login?next=/books/new");
+    assert.equal(listBooks().length, before);
+  });
+
+  test("protect-book-mutation-5: GET /books y GET /authors siguen siendo públicos", async () => {
+    const booksRes = await fetch(`${baseUrl}/books`);
+    assert.equal(booksRes.status, 200);
+    const authorsRes = await fetch(`${baseUrl}/authors`);
+    assert.equal(authorsRes.status, 200);
+  });
+
+  test("protect-book-mutation-6: DELETE /books responde 405 y ruta inexistente responde 404 sin sesión", async () => {
+    const deleteRes = await fetch(`${baseUrl}/books`, { method: "DELETE" });
+    assert.equal(deleteRes.status, 405);
+    const notFoundRes = await fetch(`${baseUrl}/ruta-inexistente`);
+    assert.equal(notFoundRes.status, 404);
   });
 });
