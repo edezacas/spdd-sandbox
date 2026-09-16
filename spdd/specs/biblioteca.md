@@ -87,6 +87,75 @@
 - Per-author book counts or any join with `Book` data.
 - JSON/API endpoints or cursor-based pagination — page-based HTML only.
 
+**Caché condicional HTTP (ETag) en los listados públicos**
+
+- Scenario: Los listados públicos exitosos anuncian validadores de caché (conditional_get-01)
+  - GIVEN el repositorio tiene 2 autores ("Ana" y "Beto") y 1 libro ("Dune" de "Ana")
+  - WHEN el cliente pide `/books`, `/authors` o `/authors?page=2&pageSize=1` sin cabeceras condicionales
+  - THEN la respuesta es 200 con el HTML completo del listado
+  - AND la respuesta lleva un header ETag con formato `"<hex>"` (comillas dobles, hexadecimal, sin prefijo W/)
+  - AND la respuesta lleva el header Cache-Control con el valor `no-cache`
+  - AND repetir exactamente la misma petición devuelve exactamente el mismo ETag
+
+- Scenario: Los listados vacíos llevan ETag y Cache-Control (conditional_get-02)
+  - GIVEN el repositorio está vacío (0 autores, 0 libros)
+  - WHEN el cliente pide `/books` o `/authors` sin cabeceras condicionales
+  - THEN la respuesta es 200 con el HTML de listado vacío ("No hay libros todavía." o "No hay autores todavía.")
+  - AND la respuesta lleva un header ETag con formato `"<hex>"` y el header Cache-Control `no-cache`
+
+- Scenario: Revalidar con el ETag vigente responde 304 sin cuerpo (conditional_get-03)
+  - GIVEN el repositorio tiene 2 autores y 1 libro
+  - AND el cliente pidió `/books` o `/authors` una vez y recibió su ETag
+  - WHEN el cliente vuelve a pedir la misma ruta con el header If-None-Match con ese ETag
+  - THEN la respuesta es 304 con el cuerpo vacío
+  - AND la respuesta lleva el mismo ETag que recibió la primera petición y el header Cache-Control `no-cache`
+
+- Scenario: Revalidación fallida devuelve el 200 completo con el ETag vigente (conditional_get-04)
+  - GIVEN el repositorio tiene 2 autores y 1 libro
+  - WHEN el cliente pide `/books` o `/authors` con: sin header If-None-Match, o If-None-Match con un valor que no coincide, o If-None-Match con el ETag de otro recurso
+  - THEN la respuesta es 200 con el HTML completo del listado
+  - AND la respuesta lleva el ETag vigente de la ruta solicitada
+
+- Scenario: Un ETag queda obsoleto tras insertar un libro desde la UI (conditional_get-05)
+  - GIVEN el repositorio tiene 1 autor ("Ana")
+  - AND el cliente pidió GET /books y guardó su ETag
+  - WHEN el bibliotecario inicia sesión e inserta el libro "Dune" vía POST /books
+  - AND el cliente pide GET /books con If-None-Match con el ETag guardado
+  - THEN la respuesta es 200 con el listado completo, que incluye "Dune"
+  - AND el ETag de esta respuesta es distinto del ETag guardado
+
+- Scenario: El asterisco revalida a 304 (conditional_get-06)
+  - GIVEN el repositorio tiene 1 autor ("Ana")
+  - WHEN el cliente pide `/books` o `/authors` con el header If-None-Match: *
+  - THEN la respuesta es 304 con el cuerpo vacío
+  - AND la respuesta lleva el ETag vigente del recurso y el header Cache-Control `no-cache`
+
+- Scenario: GET /books/new no participa en la caché condicional (conditional_get-07)
+  - GIVEN el bibliotecario tiene sesión válida (cookie de sesión)
+  - WHEN el cliente pide GET /books/new con el header If-None-Match: "lo-que-sea"
+  - THEN la respuesta es 200 con el formulario HTML completo (con el `<select>` de autores)
+  - AND la respuesta no lleva header ETag
+
+- Scenario: Un 400 de /authors ignora las cabeceras condicionales (conditional_get-08)
+  - GIVEN el repositorio tiene 1 autor ("Ana")
+  - WHEN el cliente pide GET /authors?page=abc con el header If-None-Match: "lo-que-sea"
+  - THEN la respuesta es 400 con el mensaje de error HTML y sin header ETag
+
+**Out of scope (caché condicional):**
+- GET /books/new, GET/POST /login, POST /logout: sin ETag ni manejo condicional.
+- Caché a nivel de aplicación (memoización de listAuthorsPage con invalidación en addAuthor): descartada explícitamente.
+- Cabeceras Last-Modified, Expires, Vary; ETags débiles (`W/"..."`).
+- If-Match, If-Range, If-Modified-Since; listas de ETags en If-None-Match.
+- Freshness caching (`max-age > 0`), proxies/CDN.
+- Verbos no GET (siguen 405) y HEAD.
+
+**Acceptance statements (caché condicional):**
+- La lógica condicional (calcular ETag del cuerpo, comparar If-None-Match, responder 304 o 200) se implementa una única vez y es compartida por ambas rutas; no se duplica por handler.
+- Sin dependencias nuevas en runtime (solo módulos nativos de Node, p. ej. `node:crypto` para el hash).
+- Las vistas siguen siendo funciones puras que devuelven strings HTML; la caché condicional no altera el HTML renderizado.
+- Los ids de escenario (`conditional_get-NN`) son los nombres de los tests.
+- Los tests existentes (`npm test`) siguen pasando sin cambios de comportamiento observable.
+
 **Login del bibliotecario (web)**
 
 - Scenario: El formulario de login se muestra sin sesión (login-session-1)
@@ -166,16 +235,16 @@
 |------|-----------|-------------|
 | `GET` | `/books/new` | Requiere sesión de bibliotecario: sin sesión responde `302` a `/login?next=/books/new` (nunca `401`/`403`) sin renderizar nada. Con sesión, muestra el formulario HTML para insertar un libro (título + `<select>` de autores existentes vía `listAuthors()`). Si no hay autores, muestra un aviso en vez del `<select>`. |
 | `POST` | `/books` | Requiere sesión de bibliotecario: sin sesión responde `302` a `/login?next=/books/new`, no crea ningún libro y descarta los datos enviados. Con sesión, procesa el formulario: valida `title` (no vacío/no solo espacios) y `authorId` (no vacío y existente vía `getAuthor()`), crea el libro vía `addBook()` con `id = crypto.randomUUID()`, redirige (`302`) a `/books`. En caso de validación fallida responde `400` con mensaje de error y no crea el libro. |
-| `GET` | `/books` | Lista todos los libros existentes (título + nombre de autor resuelto vía `getAuthor()`), sirve de confirmación visual tras insertar. |
-| `GET` | `/authors?page=<n>&pageSize=<m>` | Paginated HTML listing of authors in insertion order. Both params optional: `page` (1-based, default 1) and `pageSize` (default 10, max 100). Invalid values → `400` + HTML error message. A page beyond the last → `200` with an empty page. Renders prev/next links and a "page X of Y" indicator (rendered in Spanish: "Página X de Y"). Non-GET verbs on `/authors` → `405`, same policy as `/books`. The router splits the query string off `req.url` before matching paths. |
+| `GET` | `/books` | Lista todos los libros existentes (título + nombre de autor resuelto vía `getAuthor()`), sirve de confirmación visual tras insertar. Las respuestas 200 llevan `ETag` fuerte (SHA-256 hex del cuerpo) y `Cache-Control: no-cache`; un `If-None-Match` coincidente o `*` devuelve 304 con cuerpo vacío. La invalidación es automática por contenido.
+| `GET` | `/authors?page=<n>&pageSize=<m>` | Paginated HTML listing of authors in insertion order. Both params optional: `page` (1-based, default 1) and `pageSize` (default 10, max 100). Invalid values → `400` + HTML error message (sin ETag ni manejo condicional). A page beyond the last → `200` with an empty page. Renders prev/next links and a "page X of Y" indicator (rendered in Spanish: "Página X de Y"). Non-GET verbs on `/authors` → `405`, same policy as `/books`. The router splits the query string off `req.url` before matching paths. Las respuestas 200 llevan `ETag` fuerte y `Cache-Control: no-cache`; un `If-None-Match` coincidente o `*` devuelve 304 con cuerpo vacío.
 | `GET` | `/login` | Muestra el formulario de login (usuario + contraseña, `method="POST" action="/login"`). Con sesión válida redirige (`302`) a `/books/new` sin renderizar el formulario. |
 | `POST` | `/login` | Campos vacíos → `400` con el formulario re-renderizado. Credenciales incorrectas → `401` con el mensaje "Usuario o contraseña incorrectos." (idéntico ante usuario inexistente o contraseña errónea) y sin cookie. Credenciales correctas → crea la sesión, establece la cookie y redirige (`302`) a `next` si es un path same-origin (empieza por `/`), si no a `/books/new`. |
 | `POST` | `/logout` | Invalida la sesión actual si existe (no-op inofensivo si no hay cookie o es irreconocible) y limpia/expira la cookie. Siempre `302` a `/login`. Verbos no soportados sobre `/login` o `/logout` → `405`, same policy as `/books`. |
 
 **Implementado por:**
 - `src/web/server.ts` — servidor HTTP (módulo nativo `http`), enrutamiento de las Operations (compara la ruta con la query string separada de `req.url`), `404`/`405` para rutas/verbos no soportados, y guard de sesión (`requireSession`) que protege `GET /books/new` y `POST /books`: sin sesión válida responde `302` a `/login?next=<path>` sin llegar al handler. Exporta `server`; solo llama a `server.listen()` cuando se ejecuta como entrypoint (`require.main === module`), para permitir testearlo sin abrir el puerto 3000 real.
-- `src/web/routes/books.ts` — handlers `handleNewBookForm`, `handleListBooks`, `handleCreateBook`.
-- `src/web/routes/authors.ts` — handler `handleListAuthors`: parsea la query, valida `page`/`pageSize` (enteros positivos estrictos, `pageSize` ≤ 100; `400` si no), llama a `listAuthorsPage` y renderiza. La validación de entrada externa vive en la capa web; el dominio lanza como salvaguarda.
+- `src/web/routes/books.ts` — handlers `handleNewBookForm`, `handleListBooks` (usa `sendHtmlWithConditionalGet`), `handleCreateBook`.
+- `src/web/routes/authors.ts` — handler `handleListAuthors`: parsea la query, valida `page`/`pageSize` (enteros positivos estrictos, `pageSize` ≤ 100; `400` si no — sin ETag), llama a `listAuthorsPage` y renderiza (200 usa `sendHtmlWithConditionalGet`). La validación de entrada externa vive en la capa web; el dominio lanza como salvaguarda.
 - `src/web/views/bookForm.ts` — funciones puras `renderBookForm`, `renderBookList` que generan el HTML (con `escapeHtml` para evitar inyección de HTML desde `title`/`name` de usuario).
 - `src/web/views/authorList.ts` — función pura `renderAuthorList(page: AuthorsPage)` (tabla, enlaces prev/next, indicador "Página X de Y", `escapeHtml` en nombres) y `renderAuthorListError` para la página de error `400`.
 - `src/domain/user.ts` — entidad `User` y su repositorio en memoria (`addUser`, `getUserByUsername`), más `hashPassword`/`verifyPassword` (hash con sal, comparación en tiempo constante).
@@ -183,6 +252,7 @@
 - `src/web/routes/auth.ts` — handlers `handleLoginForm`, `handleLoginSubmit`, `handleLogout`: validación de campos, mensaje genérico de credenciales incorrectas y validación de `next` same-origin.
 - `src/web/seed.ts` — siembra idempotente de la única cuenta de bibliotecario (`bibliotecario` / `biblioteca123`, literales hardcodeados) al arrancar el servidor.
 - `src/web/views/loginForm.ts` — función pura `renderLoginForm` (con `escapeHtml`, mensaje de error inline opcional y campo oculto `next`).
+- `src/web/conditionalGet.ts` — función compartida `sendHtmlWithConditionalGet(req, res, html)`: calcula ETag fuerte (SHA-256 hex) del cuerpo HTML, compara con `If-None-Match` (coincidencia exacta o `*`), responde 304 (cuerpo vacío) o 200 (cuerpo completo) con `ETag` y `Cache-Control: no-cache`. Usada por `handleListBooks` y `handleListAuthors` en su camino 200; el camino 400 de `/authors` no participa.
 
 ---
 
@@ -204,3 +274,4 @@
 - `SPDD-2026-08-30-1041-insertar-libros-web` — capa web (`src/web/`) para insertar libros manualmente vía formulario HTML. Archivado en `spdd/archive/`.
 - `SPDD-2026-09-07-1204-paginated-author-listing` — paginated author listing (`GET /authors`): paginación HTML del listado de autores (`listAuthorsPage`, rutas y vistas en `src/web/`); `listAuthors()` queda intacto. Archivado en `spdd/archive/`.
 - `SPDD-2026-09-07-2238-login-bibliotecario` — login del bibliotecario: entidad `User` + hashing en el dominio (`src/domain/user.ts`), flujo web `GET /login`, `POST /login` y `POST /logout` con sesión en memoria vía cookie (`src/web/session.ts`, `src/web/routes/auth.ts`, `src/web/seed.ts`, `src/web/views/loginForm.ts`) y guard de sesión en el alta de libros (`requireSession` en `src/web/server.ts`); `GET /books` y `GET /authors` siguen públicas. Archivado en `spdd/archive/`.
+- `add-caching` — caché condicional HTTP (ETag) en los listados públicos (`GET /books` y `GET /authors`): `sendHtmlWithConditionalGet` en `src/web/conditionalGet.ts` (hash SHA-256 fuerte, `Cache-Control: no-cache`, 304 vacío ante `If-None-Match` coincidente o `*`), integrado en `handleListBooks` y `handleListAuthors` en su camino 200. Los 400, 405, 404, 302 y `GET /books/new` quedan sin ETag. Archivado en `spdd/archive/`.

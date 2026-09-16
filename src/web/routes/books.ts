@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { addBook, listBooks } from "../../domain/book";
 import { getAuthor, listAuthors } from "../../domain/author";
 import { BookListRow, renderBookForm, renderBookList } from "../views/bookForm";
+import { sendHtmlWithConditionalGet } from "../conditionalGet";
 
 function sendHtml(res: ServerResponse, statusCode: number, html: string): void {
   res.writeHead(statusCode, { "Content-Type": "text/html; charset=utf-8" });
@@ -16,12 +17,12 @@ export function handleNewBookForm(_req: IncomingMessage, res: ServerResponse): v
 }
 
 /** GET /books — lista todos los libros existentes (título + nombre de autor). */
-export function handleListBooks(_req: IncomingMessage, res: ServerResponse): void {
+export function handleListBooks(req: IncomingMessage, res: ServerResponse): void {
   const rows: BookListRow[] = listBooks().map((book) => ({
     book,
     authorName: getAuthor(book.authorId)?.name ?? "Autor desconocido",
   }));
-  sendHtml(res, 200, renderBookList(rows));
+  sendHtmlWithConditionalGet(req, res, renderBookList(rows));
 }
 
 /**

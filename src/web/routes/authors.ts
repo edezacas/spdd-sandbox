@@ -1,6 +1,7 @@
 import { IncomingMessage, ServerResponse } from "http";
 import { listAuthorsPage } from "../../domain/author";
 import { renderAuthorList, renderAuthorListError } from "../views/authorList";
+import { sendHtmlWithConditionalGet } from "../conditionalGet";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 10;
@@ -28,6 +29,8 @@ export function handleListAuthors(req: IncomingMessage, res: ServerResponse): vo
   const pagination = readPagination(url.searchParams);
 
   if (pagination === null) {
+    // El 400 de validación no participa en la caché condicional: sin ETag
+    // ni manejo de If-None-Match.
     sendHtml(
       res,
       400,
@@ -39,7 +42,7 @@ export function handleListAuthors(req: IncomingMessage, res: ServerResponse): vo
   }
 
   const page = listAuthorsPage(pagination.page, pagination.pageSize);
-  sendHtml(res, 200, renderAuthorList(page));
+  sendHtmlWithConditionalGet(req, res, renderAuthorList(page));
 }
 
 /** Returns null when any present param is not a strict positive integer (or pageSize > 100). */
