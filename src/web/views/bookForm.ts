@@ -1,5 +1,4 @@
 import { Author } from "../../domain/author";
-import { Book } from "../../domain/book";
 
 function escapeHtml(value: string): string {
   return value
@@ -56,36 +55,4 @@ export function renderBookForm(authors: Author[], errorMessage?: string): string
   `;
 
   return layout("Insertar libro", body);
-}
-
-/** Fila del listado: el libro junto con el nombre ya resuelto de su autor. */
-export interface BookListRow {
-  book: Book;
-  authorName: string;
-}
-
-/** Genera el HTML del listado de libros (título + autor). */
-export function renderBookList(rows: BookListRow[]): string {
-  const rowsHtml =
-    rows.length > 0
-      ? rows
-          .map(
-            (r) =>
-              `<tr><td>${escapeHtml(r.book.title)}</td><td>${escapeHtml(r.authorName)}</td></tr>`
-          )
-          .join("\n")
-      : `<tr><td colspan="2">No hay libros todavía.</td></tr>`;
-
-  const body = `
-    <h1>Libros</h1>
-    <table border="1" cellpadding="4">
-      <thead><tr><th>Título</th><th>Autor</th></tr></thead>
-      <tbody>
-        ${rowsHtml}
-      </tbody>
-    </table>
-    <p><a href="/books/new">Insertar nuevo libro</a></p>
-  `;
-
-  return layout("Libros", body);
 }
